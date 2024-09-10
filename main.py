@@ -15,6 +15,8 @@ def backtest_strategy(df, strategy_function, initial_capital=10000):
     position = 0
     capital = initial_capital
     trades = []
+    daily_returns = []
+    equity_curve = [initial_capital]
 
     for i in range(1, len(df)):
         current_data = df.iloc[i]
@@ -45,9 +47,14 @@ def backtest_strategy(df, strategy_function, initial_capital=10000):
                 "价格": current_data['close'],
                 "资金": capital
             })
+        
+        current_equity = capital + position * current_data['close']
+        equity_curve.append(current_equity)
+        daily_return = (current_equity - equity_curve[-2]) / equity_curve[-2]
+        daily_returns.append(daily_return)
 
-    final_assets = capital + position * df.iloc[-1]['close']
-    return trades, final_assets
+    final_equity = capital + position * df.iloc[-1]['close']
+    return trades, final_equity, daily_returns, equity_curve
 
 def rsi_strategy(current_data, prev_data, position, capital):
     current_rsi = current_data['RSI']
@@ -66,6 +73,34 @@ def rsi_strategy(current_data, prev_data, position, capital):
     
     return "持有", 0
 
+def calculate_metrics(initial_capital, final_equity, daily_returns, equity_curve):
+    total_return = (final_equity - initial_capital) / initial_capital * 100
+    cagr = (final_equity / initial_capital) ** (252 / len(daily_returns)) - 1
+    
+    daily_returns_series = pd.Series(daily_returns)
+    sharpe_ratio = np.sqrt(252) * daily_returns_series.mean() / daily_returns_series.std()
+    sortino_ratio = np.sqrt(252) * daily_returns_series.mean() / daily_returns_series[daily_returns_series < 0].std()
+    
+    max_drawdown = np.min(equity_curve / np.maximum.accumulate(equity_curve) - 1)
+    calmar_ratio = cagr / abs(max_drawdown)
+    
+    best_day = daily_returns_series.max()
+    worst_day = daily_returns_series.min()
+    
+    metrics = {
+        "总回报率": f"{total_return:.2f}%",
+        "年化收益率 (CAGR)": f"{cagr*100:.2f}%",
+        "夏普比率": f"{sharpe_ratio:.2f}",
+        "索提诺比率": f"{sortino_ratio:.2f}",
+        "最大回撤": f"{max_drawdown*100:.2f}%",
+        "卡玛比率": f"{calmar_ratio:.2f}",
+        "最佳单日收益": f"{best_day*100:.2f}%",
+        "最差单日收益": f"{worst_day*100:.2f}%",
+        "交易次数": len(trades),
+        "最终权益": final_equity
+    }
+    
+    return metrics
 
 uploaded_file = st.file_uploader("选择CSV文件", type="csv")
 
@@ -97,24 +132,6 @@ if uploaded_file is not None:
     fig.add_trace(go.Scatter(x=df_resampled[x_axis], y=df_resampled[y_axis], name=y_axis), row=1, col=1)
     fig.add_trace(go.Scatter(x=df_resampled[x_axis], y=df_resampled['RSI'], name='RSI'), row=2, col=1)
     
-    short_signals = df_resampled[df_resampled['RSI'] > 80]
-    fig.add_trace(go.Scatter(
-        x=short_signals[x_axis],
-        y=short_signals[y_axis],
-        mode='markers',
-        marker=dict(symbol='triangle-down', size=10, color='red'),
-        name='做空信号'
-    ), row=1, col=1)
-
-    long_signals = df_resampled[df_resampled['RSI'] < 20]
-    fig.add_trace(go.Scatter(
-        x=long_signals[x_axis],
-        y=long_signals[y_axis],
-        mode='markers',
-        marker=dict(symbol='triangle-up', size=10, color='green'),
-        name='做多信号'
-    ), row=1, col=1)
-    
     fig.update_layout(height=600, title_text=f'{y_axis} and RSI vs {x_axis}')
     fig.update_yaxes(title_text=y_axis, row=1, col=1)
     fig.update_yaxes(title_text='RSI', row=2, col=1)
@@ -123,8 +140,10 @@ if uploaded_file is not None:
 
     # 回测逻辑
     if 'close' in df_resampled.columns and 'RSI' in df_resampled.columns:
-        trades, final_assets = backtest_strategy(df_resampled, rsi_strategy)
-
+        
+        initial_capital = 100000
+        trades, final_equity, daily_returns, equity_curve = backtest_strategy(df_resampled, rsi_strategy, initial_capital)
+        
         st.subheader("回测结果")
         st.write("交易记录:")
         
@@ -138,7 +157,17 @@ if uploaded_file is not None:
         else:
             st.write("没有执行任何交易。")
 
-        st.write(f"最终资产: {final_assets:.2f}")
+        metrics = calculate_metrics(initial_capital, final_equity, daily_returns, equity_curve)
+        st.subheader("策略表现指标")
+        for key, value in metrics.items():
+            st.write(f"{key}: {value}")
+        
+        # 绘制权益曲线
+        fig_equity = go.Figure()
+        fig_equity.add_trace(go.Scatter(y=equity_curve, mode='lines', name='权益曲线'))
+        fig_equity.update_layout(title='策略权益曲线', xaxis_title='交易日', yaxis_title='权益')
+        st.plotly_chart(fig_equity)
+
     else:
         st.error("数据中缺少 'close' 或 'RSI' 列，无法进行回测。")
 
